@@ -1,0 +1,51 @@
+name: Windows installer smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag
+        required: true
+        type: string
+      sha256:
+        description: Expected SHA-256 of the Windows installer
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      INSTALLER_SHA256: ${{ inputs.sha256 }}
+    steps:
+      - name: Verify, install and start Sonar Hub
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testRoot = Join-Path $env:RUNNER_TEMP 'sonar-hub-smoke'
+          New-Item -ItemType Directory -Path $testRoot | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern '*Windows-x64-Setup.exe' --dir $testRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Release download failed' }
+          $installer = Get-ChildItem -LiteralPath $testRoot -Filter '*Windows-x64-Setup.exe'
+          if ($installer.Count -ne 1) { throw 'Expected one installer' }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash -ne $env:INSTALLER_SHA256) { throw 'Installer checksum mismatch' }
+          $destination = Join-Path $testRoot 'installed'
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installer exited $($setup.ExitCode)" }
+          $application = Join-Path $destination 'Sonar Hub.exe'
+          if (!(Test-Path -LiteralPath $application)) { throw 'Sonar Hub.exe is missing after install' }
+          $profile = Join-Path $env:APPDATA 'Ferdium Kisisel'
+          if (Test-Path -LiteralPath $profile) { throw 'The smoke test requires a clean profile' }
+          $app = Start-Process -FilePath $application -PassThru
+          try {
+            Start-Sleep -Seconds 18
+            $app.Refresh()
+            if ($app.HasExited) { throw "Sonar Hub exited $($app.ExitCode)" }
+            if (!(Test-Path -LiteralPath (Join-Path $profile 'window-state.json'))) { throw 'Application did not initialize its profile' }
+            Write-Host 'Windows x64 installer and first launch passed.'
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
+          }
